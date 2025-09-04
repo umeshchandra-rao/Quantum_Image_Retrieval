@@ -1,0 +1,22 @@
+# Environment files
+.env
+.azure_env
+*.env
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Logs
+*.log
+
+# Uploads (if not wanted)
+# uploads/
+
+# Data (if sensitive)
+# data/
+
+# Model files (if large)
+# *.pth
