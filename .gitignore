@@ -13,10 +13,12 @@ __pycache__/
 *.log
 
 # Uploads (if not wanted)
-# uploads/
+uploads/
 
 # Data (if sensitive)
-# data/
+data/professional_images/healthcare/
+data/professional_images/satellite/
+data/professional_images/surveillance/
 
 # Model files (if large)
 # *.pth
