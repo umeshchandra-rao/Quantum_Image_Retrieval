@@ -527,25 +527,7 @@ python test_upload_system.py  # Validate setup
 - **Performance Optimization**: Optimize quantum-classical hybrid approaches
 - **Domain Extensions**: Add new image categories and use cases
 
-## 📈 Roadmap
 
-### Short Term (Q1 2025)
-- [ ] Docker containerization
-- [ ] Automated testing pipeline
-- [ ] Performance benchmarking suite
-- [ ] API documentation
-
-### Medium Term (Q2-Q3 2025)  
-- [ ] Multi-modal search (text + image)
-- [ ] Advanced quantum kernels
-- [ ] Real-time streaming processing
-- [ ] Mobile application
-
-### Long Term (Q4 2025+)
-- [ ] True quantum hardware integration
-- [ ] Federated learning capabilities
-- [ ] Advanced semantic understanding
-- [ ] Cross-domain image retrieval
 
 ## 📄 Citation
 
@@ -561,17 +543,6 @@ If you use this system in your research, please cite:
 }
 ```
 
-## 📞 Support
-
-### Documentation
-- **Technical Details**: `QUANTUM_ANALYSIS_REPORT.md`
-- **Project Verification**: `PROJECT_VERIFICATION_REPORT.md`
-- **System Architecture**: This README
-
-### Contact
-- **Issues**: GitHub Issues tab
-- **Discussions**: GitHub Discussions
-- **Email**: [Contact information if available]
 
 ## 📜 License
 
