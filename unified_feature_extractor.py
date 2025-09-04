@@ -49,6 +49,16 @@ class UnifiedFeatureExtractor:
     FEATURE_DIM = 8
     REGION = "Central India"
     
+    # Singleton instance
+    _instance = None
+    _initialized = False
+    
+    def __new__(cls, *args, **kwargs):
+        """Singleton pattern - ensure only one instance exists"""
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+    
     def __init__(self, cosmos_endpoint=None, cosmos_key=None, database_name=None, container_name=None):
         """
         Initialize unified feature extractor for India region
@@ -59,6 +69,10 @@ class UnifiedFeatureExtractor:
             database_name: Database name (defaults to quantum-images-india)
             container_name: Container name (defaults to feature-vectors-india)
         """
+        # Skip initialization if already done (singleton pattern)
+        if self._initialized:
+            return
+            
         # India region configuration
         self.cosmos_endpoint = cosmos_endpoint or "https://quantum-cosmos-india.documents.azure.com:443/"
         # Improved key handling with multiple fallback options
@@ -76,23 +90,27 @@ class UnifiedFeatureExtractor:
         # Device configuration
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         
-        # Initialize model
+        # Initialize model once
         self._setup_resnet_model()
         
-        # Initialize Azure clients (lazy initialization)
+        # Initialize Azure clients with connection pooling (lazy initialization)
         self.cosmos_client = None
         self.database = None
         self.container = None
         
-        logger.info(f"UnifiedFeatureExtractor v{self.VERSION} initialized for {self.REGION}")
+        # Mark as initialized
+        self._initialized = True
+        
+        logger.info(f"UnifiedFeatureExtractor v{self.VERSION} initialized for {self.REGION} (Singleton)")
         logger.info(f"Feature dimension: {self.FEATURE_DIM}D")
         logger.info(f"Device: {self.device}")
     
     def _setup_resnet_model(self):
         """Initialize ResNet-50 model for consistent 8D feature extraction"""
         try:
-            # Load pre-trained ResNet-50 (same as original migration script)
-            self.model = models.resnet50(pretrained=True)
+            # Load pre-trained ResNet-50 (fix deprecated parameter)
+            from torchvision.models import ResNet50_Weights
+            self.model = models.resnet50(weights=ResNet50_Weights.IMAGENET1K_V1)
             
             # Replace final layer for 8D output
             self.model.fc = torch.nn.Linear(self.model.fc.in_features, self.FEATURE_DIM)
@@ -127,20 +145,39 @@ class UnifiedFeatureExtractor:
             raise RuntimeError(f"Model initialization failed: {e}")
     
     def _initialize_cosmos_client(self):
-        """Initialize Cosmos DB client (lazy initialization)"""
+        """Initialize Cosmos DB client with connection pooling (lazy initialization)"""
         if self.cosmos_client is None:
             try:
                 if not self.cosmos_key:
                     raise ValueError("COSMOS_DB_KEY environment variable not set")
                 
-                self.cosmos_client = CosmosClient(self.cosmos_endpoint, self.cosmos_key)
+                # Configure connection policy for better performance if available
+                connection_kwargs = {}
+                try:
+                    from azure.cosmos import ConnectionPolicy
+                    connection_policy = ConnectionPolicy()
+                    connection_policy.PreferredLocations = ['Central India', 'South India']  # Preferred regions
+                    connection_policy.ConnectionMode = 'Gateway'  # Use Gateway mode for better compatibility
+                    connection_policy.MaxPoolSize = 10  # Connection pool size
+                    connection_policy.IdleConnectionTimeoutInMs = 60000  # 60 seconds timeout
+                    connection_kwargs['connection_policy'] = connection_policy
+                    logger.info("Using advanced connection policy with pooling")
+                except ImportError:
+                    logger.info("ConnectionPolicy not available, using default connection settings")
+                
+                self.cosmos_client = CosmosClient(
+                    self.cosmos_endpoint, 
+                    self.cosmos_key,
+                    **connection_kwargs
+                )
+                
                 self.database = self.cosmos_client.create_database_if_not_exists(id=self.database_name)
                 self.container = self.database.create_container_if_not_exists(
                     id=self.container_name,
                     partition_key=PartitionKey(path="/image_id")
                 )
                 
-                logger.info(f"Cosmos DB client initialized for {self.REGION}")
+                logger.info(f"Cosmos DB client initialized for {self.REGION} with optimized settings")
                 logger.info(f"   Database: {self.database_name}")
                 logger.info(f"   Container: {self.container_name}")
                 
@@ -150,7 +187,7 @@ class UnifiedFeatureExtractor:
     
     def extract_features_from_image(self, image_input: Union[str, Path, Image.Image, bytes]) -> Optional[List[float]]:
         """
-        Extract 8D feature vector from image input
+        Extract 8D feature vector from image input with proper resource management
         
         Args:
             image_input: Can be:
@@ -161,6 +198,9 @@ class UnifiedFeatureExtractor:
         Returns:
             List of 8 float values representing the feature vector
         """
+        image = None
+        input_tensor = None
+        
         try:
             # Handle different input types
             if isinstance(image_input, (str, Path)):
@@ -195,6 +235,19 @@ class UnifiedFeatureExtractor:
         except Exception as e:
             logger.error(f"Feature extraction failed: {str(e)}")
             return None
+        finally:
+            # Clean up resources
+            if input_tensor is not None:
+                del input_tensor
+            if image is not None and not hasattr(image_input, 'convert'):
+                # Only close if we opened the image (not if it was passed in)
+                try:
+                    image.close()
+                except:
+                    pass
+            # Force garbage collection for large images
+            if hasattr(torch.cuda, 'empty_cache'):
+                torch.cuda.empty_cache()
     
     def extract_batch_features(self, image_inputs: List[Union[str, Path, bytes]]) -> List[Optional[List[float]]]:
         """

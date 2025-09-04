@@ -5,7 +5,7 @@ This web application provides a user interface for uploading images
 and finding similar images using the enhanced quantum image retrieval system.
 """
 
-from flask import Flask, render_template, request, jsonify, send_from_directory, url_for
+from flask import Flask, render_template, request, jsonify, send_from_directory, url_for, Response
 from flask_cors import CORS
 import os
 import sys
@@ -16,6 +16,35 @@ import io
 import json
 import time
 from datetime import datetime
+import logging
+
+# Azure imports for blob storage
+from azure.storage.blob import BlobServiceClient
+
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+# Custom Exception Classes
+class QuantumImageRetrievalError(Exception):
+    """Base exception for Quantum Image Retrieval System"""
+    pass
+
+class FeatureExtractionError(QuantumImageRetrievalError):
+    """Raised when feature extraction fails"""
+    pass
+
+class DatabaseConnectionError(QuantumImageRetrievalError):
+    """Raised when database connection fails"""
+    pass
+
+class ImageValidationError(QuantumImageRetrievalError):
+    """Raised when image validation fails"""
+    pass
+
+class QuantumAlgorithmError(QuantumImageRetrievalError):
+    """Raised when quantum algorithm fails"""
+    pass
 
 def make_json_safe(obj):
     """Convert object to JSON-safe format"""
@@ -70,13 +99,13 @@ cloud_retrieval = None
 image_features_cache = {}
 
 def initialize_components():
-    """Initialize the system components"""
+    """Initialize the system components with optimized resource management"""
     global feature_extractor, quantum_algorithm, cloud_retrieval
     
     # Validate configuration first
     config.validate_config()
     
-    # Initialize unified feature extractor for India region with explicit validation
+    # Initialize unified feature extractor (singleton pattern ensures single instance)
     try:
         feature_extractor = UnifiedFeatureExtractor(
             cosmos_endpoint=config.COSMOS_ENDPOINT,
@@ -85,6 +114,7 @@ def initialize_components():
             container_name=config.COSMOS_CONTAINER
         )
     except ValueError as e:
+        logger.error(f"Feature extractor initialization failed: {e}")
         raise
     
     # Initialize quantum algorithm with quantum-inspired mode for performance
@@ -96,6 +126,7 @@ def initialize_components():
         )
     else:
         quantum_algorithm = None
+        logger.warning("Quantum algorithm not available")
     
     return True
 
@@ -170,12 +201,26 @@ def index():
 def upload():
     """Handle image upload and similarity search using cloud infrastructure"""
     
+    # Validate request
     if 'file' not in request.files:
+        logger.warning("Upload request missing file")
         return jsonify({"error": "No image file provided"}), 400
     
     file = request.files['file']
     if file.filename == '':
+        logger.warning("Upload request with empty filename")
         return jsonify({"error": "No file selected"}), 400
+    
+    try:
+        # Validate uploaded file
+        config.validate_uploaded_file(file)
+        
+    except ValueError as e:
+        logger.error(f"File validation failed: {e}")
+        return jsonify({"error": f"Invalid file: {str(e)}"}), 400
+    except Exception as e:
+        logger.error(f"Unexpected validation error: {e}")
+        return jsonify({"error": "File validation failed"}), 500
     
     try:
         # Save uploaded file
@@ -184,158 +229,197 @@ def upload():
         filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
         file.save(filepath)
         
-        # Read image
+        # Process image
+        return _process_uploaded_image(filepath, filename)
+        
+    except ImageValidationError as e:
+        logger.error(f"Image validation error: {e}")
+        return jsonify({"error": f"Invalid image: {str(e)}"}), 400
+    except FeatureExtractionError as e:
+        logger.error(f"Feature extraction error: {e}")
+        return jsonify({"error": "Feature extraction failed"}), 500
+    except DatabaseConnectionError as e:
+        logger.error(f"Database connection error: {e}")
+        return jsonify({"error": "Database connection failed"}), 503
+    except QuantumAlgorithmError as e:
+        logger.error(f"Quantum algorithm error: {e}")
+        return jsonify({"error": "Similarity calculation failed"}), 500
+    except Exception as e:
+        logger.error(f"Unexpected error in upload: {e}", exc_info=True)
+        return jsonify({"error": "An unexpected error occurred"}), 500
+
+def _process_uploaded_image(filepath, filename):
+    """Process uploaded image and return similarity search results"""
+    try:
+        # Read and validate image
         image = Image.open(filepath).convert('RGB')
         
         # Extract features using unified feature extractor
         query_features = feature_extractor.extract_features_from_image(image)
         
         if query_features is None:
-            return jsonify({"error": "Feature extraction failed"}), 500
+            raise FeatureExtractionError("Feature extraction returned None")
         
-        # Convert features list to numpy array for similarity search
-        import numpy as np
-        query_features_np = np.array(query_features)
+        # Perform similarity search
+        results, processing_time, search_method = _perform_similarity_search(query_features)
         
-        # Use unified feature extractor for similarity search (India region)
-        start_time = time.time()
+        # Build response
+        return _build_search_response(results, filename, processing_time, search_method)
         
-        try:
-            # Get database stats from unified extractor
-            stats = feature_extractor.get_database_stats()
-            
-            # Search for similar images using unified extractor (only top 5 results)
-            search_results = feature_extractor.search_similar_images(
-                query_features=query_features,
-                top_k=5
-            )
-            
-            # Enhanced similarity filtering with graduated confidence thresholds
-            if search_results:
-                similarities = [result['similarity'] for result in search_results]
-                max_similarity = max(similarities)
-                avg_similarity = sum(similarities) / len(similarities)
-                
-                # Graduated confidence thresholds
-                # High confidence: ≥88% (exact/near-exact matches)
-                # Good confidence: ≥84% (strong matches) 
-                
-                # Count matches by confidence level
-                high_confidence = [r for r in search_results if r['similarity'] >= 0.88]
-                good_confidence = [r for r in search_results if 0.84 <= r['similarity'] < 0.88] 
-                
-                # Accept results if we have high or good confidence matches
-                has_meaningful_matches = len(high_confidence) > 0 or len(good_confidence) > 0
-                
-                if not has_meaningful_matches:
-                    search_results = []  # Clear all results
-                else:
-                    # Keep high and good confidence results
-                    search_results = high_confidence + good_confidence
-            
-            results = []
-            for result in search_results:
-                # Only include results with similarity >= 84% (0.84)
-                if result['similarity'] < 0.84:
-                    continue
-                
-                # Get image_id and create a unified serving URL
-                image_id = result['image_id']
-                
-                # Use a single unified image serving route for ALL images
-                image_url = f"/serve_unified_image/{image_id}"
-                
-                # Detect category for metadata only
-                if image_id.startswith('healthcare_'):
-                    category = 'healthcare'
-                elif image_id.startswith('satellite_'):
-                    category = 'satellite'
-                elif image_id.startswith('surveillance_'):
-                    category = 'surveillance'
-                else:
-                    category = 'unknown'
-                
-                # Generate appropriate filename based on category
-                if category == 'satellite':
-                    filename = f"{image_id}.jpg"  # Satellite images use .jpg
-                elif category == 'surveillance':
-                    filename = f"{image_id}.jpg"  # Surveillance images typically use .jpg
-                else:
-                    filename = f"{image_id}.jpeg"  # Healthcare images use .jpeg
-                
-                # Determine confidence level for each result
-                confidence_level = "high" if result['similarity'] >= 0.88 else "good"
-                is_exact_match = result['similarity'] > 0.95  # Very high threshold for "exact"
-                
-                results.append({
-                    'id': image_id,
-                    'image_id': image_id,
-                    'image_url': image_url,
-                    'similarity': result['similarity'],
-                    'similarity_score': result['similarity'],
-                    'confidence_level': confidence_level,
-                    'type': category,
-                    'is_exact_match': is_exact_match,
-                    'metadata': {
-                        'filename': filename,
-                        'category': category,
-                        'size': 'unknown',
-                        'timestamp': datetime.now().isoformat()
-                    }
-                })
-            
-            processing_time = time.time() - start_time
-            search_method = f"India Region Cosmos DB ({stats.get('region')})"
-            
-        except Exception as cloud_error:
-            return jsonify({"status": "error", "message": f"India region Cosmos DB search failed: {cloud_error}"}), 500
+    except Exception as e:
+        logger.error(f"Error processing image {filepath}: {e}")
+        # Clean up uploaded file on error
+        if os.path.exists(filepath):
+            os.remove(filepath)
+        raise
+
+def _perform_similarity_search(query_features):
+    """Perform similarity search and return filtered results"""
+    start_time = time.time()
+    
+    try:
+        # Get database stats from unified extractor
+        stats = feature_extractor.get_database_stats()
         
-        # Return JSON response for frontend
+        # Search for similar images using unified extractor (only top 5 results)
+        search_results = feature_extractor.search_similar_images(
+            query_features=query_features,
+            top_k=5
+        )
         
-        # Enhanced response with graduated confidence levels
-        if len(results) == 0:
-            response_data = {
-                'status': 'no_matches',
-                'message': "No similar images found",
-                'results': [],
-                'similar_images': [],
-                'upload_path': f"/uploads/{filename}",
-                'processing_time': processing_time,
-                'search_method': search_method,
-                'total_images_searched': stats.get('total_images', 0)
-            }
-        else:
-            # Calculate confidence distribution
-            high_conf_count = len([r for r in results if r['confidence_level'] == 'high'])
-            good_conf_count = len([r for r in results if r['confidence_level'] == 'good'])
-            
-            response_data = {
-                'status': 'success',
-                'message': f"Found {len(results)} similar images ({high_conf_count} high-confidence, {good_conf_count} good-confidence) in {processing_time:.3f} seconds",
-                'results': results,  # minimal_upload.html expects 'results'
-                'similar_images': results,  # compatibility for frontend
-                'upload_path': f"/uploads/{filename}",
-                'processing_time': processing_time,
-                'search_method': search_method,
-                'total_images_searched': stats.get('total_images', 0),
-                'confidence_info': {
-                    'threshold_used': 0.84,
-                    'confidence_levels': {
-                        'high': '≥88%',
-                        'good': '84-88%'
-                    },
-                    'highest_similarity': max(result['similarity'] for result in results) if results else 0.0,
-                    'confidence_distribution': {
-                        'high_confidence': high_conf_count,
-                        'good_confidence': good_conf_count
-                    }
+        # Filter and process results
+        filtered_results = _filter_search_results(search_results)
+        
+        processing_time = time.time() - start_time
+        search_method = f"India Region Cosmos DB ({stats.get('region', 'unknown')})"
+        
+        return filtered_results, processing_time, search_method
+        
+    except Exception as e:
+        logger.error(f"Database search failed: {e}")
+        raise DatabaseConnectionError(f"Search failed: {e}")
+
+def _filter_search_results(search_results):
+    """Filter search results based on confidence thresholds"""
+    if not search_results:
+        return []
+    
+    # Enhanced similarity filtering with graduated confidence thresholds
+    similarities = [result['similarity'] for result in search_results]
+    
+    # Count matches by confidence level
+    high_confidence = [r for r in search_results if r['similarity'] >= config.HIGH_CONFIDENCE_THRESHOLD]
+    good_confidence = [r for r in search_results if config.GOOD_CONFIDENCE_THRESHOLD <= r['similarity'] < config.HIGH_CONFIDENCE_THRESHOLD]
+    
+    # Accept results if we have high or good confidence matches
+    has_meaningful_matches = len(high_confidence) > 0 or len(good_confidence) > 0
+    
+    if not has_meaningful_matches:
+        return []
+    
+    # Keep high and good confidence results
+    filtered_results = high_confidence + good_confidence
+    
+    # Convert to standardized format
+    results = []
+    for result in filtered_results:
+        # Only include results with similarity >= good confidence threshold
+        if result['similarity'] < config.GOOD_CONFIDENCE_THRESHOLD:
+            continue
+        
+        result_data = _format_search_result(result)
+        results.append(result_data)
+    
+    return results
+
+def _format_search_result(result):
+    """Format a single search result for API response"""
+    image_id = result['image_id']
+    
+    # Use a single unified image serving route for ALL images
+    image_url = f"/serve_unified_image/{image_id}"
+    
+    # Detect category for metadata only
+    if image_id.startswith('healthcare_'):
+        category = 'healthcare'
+    elif image_id.startswith('satellite_'):
+        category = 'satellite'
+    elif image_id.startswith('surveillance_'):
+        category = 'surveillance'
+    else:
+        category = 'unknown'
+    
+    # Generate appropriate filename based on category
+    if category == 'satellite':
+        filename = f"{image_id}.jpg"  # Satellite images use .jpg
+    elif category == 'surveillance':
+        filename = f"{image_id}.jpg"  # Surveillance images typically use .jpg
+    else:
+        filename = f"{image_id}.jpeg"  # Healthcare images use .jpeg
+    
+    # Determine confidence level for each result
+    confidence_level = "high" if result['similarity'] >= config.HIGH_CONFIDENCE_THRESHOLD else "good"
+    is_exact_match = result['similarity'] > 0.95  # Very high threshold for "exact"
+    
+    return {
+        'id': image_id,
+        'image_id': image_id,
+        'image_url': image_url,
+        'similarity': result['similarity'],
+        'similarity_score': result['similarity'],
+        'confidence_level': confidence_level,
+        'type': category,
+        'is_exact_match': is_exact_match,
+        'metadata': {
+            'filename': filename,
+            'category': category,
+            'size': 'unknown',
+            'timestamp': datetime.now().isoformat()
+        }
+    }
+
+def _build_search_response(results, filename, processing_time, search_method):
+    """Build final API response for search results"""
+    if len(results) == 0:
+        response_data = {
+            'status': 'no_matches',
+            'message': "No similar images found",
+            'results': [],
+            'similar_images': [],
+            'upload_path': f"/uploads/{filename}",
+            'processing_time': processing_time,
+            'search_method': search_method,
+            'total_images_searched': 0  # Will be updated with actual stats
+        }
+    else:
+        # Calculate confidence distribution
+        high_conf_count = len([r for r in results if r['confidence_level'] == 'high'])
+        good_conf_count = len([r for r in results if r['confidence_level'] == 'good'])
+        
+        response_data = {
+            'status': 'success',
+            'message': f"Found {len(results)} similar images ({high_conf_count} high-confidence, {good_conf_count} good-confidence) in {processing_time:.3f} seconds",
+            'results': results,  # minimal_upload.html expects 'results'
+            'similar_images': results,  # compatibility for frontend
+            'upload_path': f"/uploads/{filename}",
+            'processing_time': processing_time,
+            'search_method': search_method,
+            'total_images_searched': 0,  # Will be updated with actual stats
+            'confidence_info': {
+                'threshold_used': config.GOOD_CONFIDENCE_THRESHOLD,
+                'confidence_levels': {
+                    'high': f'≥{int(config.HIGH_CONFIDENCE_THRESHOLD * 100)}%',
+                    'good': f'{int(config.GOOD_CONFIDENCE_THRESHOLD * 100)}-{int(config.HIGH_CONFIDENCE_THRESHOLD * 100)}%'
+                },
+                'highest_similarity': max(result['similarity'] for result in results) if results else 0.0,
+                'confidence_distribution': {
+                    'high_confidence': high_conf_count,
+                    'good_confidence': good_conf_count
                 }
             }
-        
-        return jsonify(make_json_safe(response_data))
+        }
     
-    except Exception as e:
-        return jsonify({"status": "error", "message": f"Processing failed: {str(e)}"}), 500
+    return jsonify(make_json_safe(response_data))
 
 @app.route('/health')
 def health_check():
@@ -365,9 +449,105 @@ def serve_professional_image(category, filename):
 
 @app.route('/serve_unified_image/<path:filename>')
 def serve_unified_image(filename):
-    """Unified image serving route for all categories (healthcare, satellite, surveillance)"""
+    """Unified image serving route for all categories from Azure Blob Storage"""
+    
+    def get_blob_image_data(image_id):
+        """Retrieve image data from Azure Blob Storage"""
+        try:
+            # Initialize blob client if not already done
+            if not config.AZURE_STORAGE_CONNECTION_STRING:
+                logger.error("Azure Blob Storage not configured")
+                return None, "Azure Blob Storage not configured"
+            
+            blob_service_client = BlobServiceClient.from_connection_string(
+                config.AZURE_STORAGE_CONNECTION_STRING
+            )
+            
+            # Determine category and container from image_id
+            if image_id.startswith('healthcare_'):
+                container_name = 'quantum-images-healthcare'
+                base_id = image_id[len('healthcare_'):]
+                possible_extensions = ['.jpeg', '.jpg', '.png']
+            elif image_id.startswith('satellite_'):
+                container_name = 'quantum-images-satellite'
+                base_id = image_id[len('satellite_'):]
+                possible_extensions = ['.jpg', '.jpeg', '.png']
+            elif image_id.startswith('surveillance_'):
+                container_name = 'quantum-images-surveillance'
+                base_id = image_id[len('surveillance_'):]
+                possible_extensions = ['.jpg', '.jpeg', '.png']
+            else:
+                logger.error(f"Unknown image category for ID: {image_id}")
+                return None, f"Unknown image category for ID: {image_id}"
+            
+            # Try different blob name patterns based on how uploaders store files
+            blob_name_patterns = [
+                # Pattern 1: base_id + extension (e.g., "IM-0001-0001.jpeg")
+                *[base_id + ext for ext in possible_extensions],
+                # Pattern 2: category/filename (e.g., "healthcare/IM-0001-0001.jpeg")
+                *[f"{image_id.split('_')[0]}/{base_id}" + ext for ext in possible_extensions],
+                # Pattern 3: full image_id as blob name (e.g., "healthcare_IM-0001-0001.jpeg")
+                *[image_id + ext for ext in possible_extensions],
+            ]
+            
+            # Try different blob name patterns to find the blob
+            for blob_name in blob_name_patterns:
+                try:
+                    blob_client = blob_service_client.get_blob_client(
+                        container=container_name, 
+                        blob=blob_name
+                    )
+                    
+                    # Check if blob exists and download
+                    if blob_client.exists():
+                        blob_data = blob_client.download_blob().readall()
+                        # Return the extension from the blob name for MIME type
+                        ext = '.' + blob_name.split('.')[-1] if '.' in blob_name else '.jpg'
+                        return blob_data, ext
+                        
+                except Exception as e:
+                    continue
+            
+            return None, f"Image not found in any container: {image_id}"
+            
+        except Exception as e:
+            logger.error(f"Error retrieving image from blob storage: {e}")
+            return None, f"Blob storage error: {e}"
+    
+    try:
+        # Get image data from Azure Blob Storage
+        image_data, ext_or_error = get_blob_image_data(filename)
+        
+        if image_data is None:
+            # Fallback to local file system as backup
+            return serve_local_image_fallback(filename)
+        
+        # Determine MIME type based on extension
+        if ext_or_error.lower() in ['.jpg', '.jpeg']:
+            mimetype = 'image/jpeg'
+        elif ext_or_error.lower() == '.png':
+            mimetype = 'image/png'
+        else:
+            mimetype = 'image/jpeg'  # Default
+        
+        # Return image data directly
+        return Response(
+            image_data,
+            mimetype=mimetype,
+            headers={
+                'Cache-Control': 'public, max-age=3600',  # Cache for 1 hour
+                'Content-Length': str(len(image_data))
+            }
+        )
+        
+    except Exception as e:
+        logger.error(f"Error serving image {filename}: {e}")
+        return jsonify({"error": f"Failed to serve image: {str(e)}"}), 500
+
+def serve_local_image_fallback(filename):
+    """Fallback to serve images from local directories if blob storage fails"""
     def find_image_file(image_id):
-        """Find the actual file for a given image_id"""        
+        """Find the actual file for a given image_id in local storage"""        
         # Determine category and base filename
         if image_id.startswith('healthcare_'):
             base_id = image_id[len('healthcare_'):]
@@ -407,13 +587,19 @@ def serve_unified_image(filename):
         
         return None, None
     
-    # Find the actual file using proven logic
-    folder, actual_filename = find_image_file(filename)
-    
-    if folder and actual_filename:
-        return send_from_directory(folder, actual_filename)
-    else:
-        return jsonify({"error": f"Image {filename} not found"}), 404
+    try:
+        # Find the actual file using proven logic
+        folder, actual_filename = find_image_file(filename)
+        
+        if folder and actual_filename:
+            return send_from_directory(folder, actual_filename)
+        else:
+            logger.error(f"Image not found in local storage either: {filename}")
+            return jsonify({"error": f"Image {filename} not found in blob storage or local storage"}), 404
+            
+    except Exception as e:
+        logger.error(f"Error in local fallback for {filename}: {e}")
+        return jsonify({"error": f"Image serving failed: {str(e)}"}), 500
 
 if __name__ == '__main__':
     # Initialize components

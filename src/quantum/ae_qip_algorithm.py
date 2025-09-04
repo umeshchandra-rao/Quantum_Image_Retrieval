@@ -127,35 +127,22 @@ class AEQIPAlgorithm:
         # Calculate phase coherence
         phase_coherence = np.mean(np.cos(np.angle(quantum_f1) - np.angle(quantum_f2)))
         
-        # Weighted combination: 70% classical, 20% quantum overlap, 10% phase coherence
-        enhanced_similarity = (0.7 * classical_sim + 
-                             0.2 * quantum_overlap + 
-                             0.1 * phase_coherence)
+        # Simplified weighted combination: 80% classical, 15% quantum overlap, 5% phase coherence
+        enhanced_similarity = (0.8 * classical_sim + 
+                             0.15 * quantum_overlap + 
+                             0.05 * phase_coherence)
         
-        # DEBUG: Print intermediate values to understand the inflation
-        print(f"🔬 [QUANTUM DEBUG] Classical sim: {classical_sim:.3f}, Enhanced: {enhanced_similarity:.3f}")
-        
-        # FIXED: Apply proper similarity mapping without artificial inflation
-        # The previous transformation was inflating all scores artificially
-        # Classical similarity is already in [-1, 1], we need to map to [0, 1] properly
-        
-        # Map classical similarity from [-1, 1] to [0, 1] range properly
+        # Map to [0, 1] range properly
         if classical_sim >= 0:
             # For positive similarities, use enhanced quantum calculation
-            final_similarity = enhanced_similarity
-        else:
-            # For negative similarities (dissimilar), map from [-1, 0] to [0, 0.5]
             final_similarity = (enhanced_similarity + 1.0) / 2.0
-        
-        # Apply stricter discrimination for random images
-        # If the classical similarity is very low, penalize heavily
-        if classical_sim < 0.3:
-            final_similarity = final_similarity * 0.5  # Reduce by half for low classical similarity
+        else:
+            # For negative similarities (dissimilar), map appropriately
+            final_similarity = max(0.0, (enhanced_similarity + 1.0) / 2.0 * 0.5)
         
         # Ensure result is in [0, 1] range
         final_similarity = max(0.0, min(1.0, final_similarity))
         
-        print(f"🔬 [QUANTUM DEBUG] Classical: {classical_sim:.3f} -> Enhanced: {enhanced_similarity:.3f} -> FINAL: {final_similarity:.3f}")
         return float(final_similarity)
     
     def _quantum_inspired_similarity(self, f1_norm, f2_norm):
@@ -172,8 +159,8 @@ class AEQIPAlgorithm:
         # Classical cosine similarity (dot product of unit vectors)
         classical_sim = np.dot(f1_norm, f2_norm)
         
-        # Enhanced phase-based quantum interference
-        # Convert to complex space with slightly different phase factors
+        # Enhanced phase-based quantum interference (simplified)
+        # Convert to complex space with phase factors
         complex_f1 = f1_norm + 1j * 0.1 * f1_norm
         complex_f2 = f2_norm + 1j * 0.1 * f2_norm
         
@@ -183,12 +170,15 @@ class AEQIPAlgorithm:
         # Calculate interference pattern using cosine (quantum-inspired)
         phase_similarity = np.mean(np.cos(phase_diff))
         
-        # Optimized quantum weighting (based on validation results)
-        # Use 80/20 weighting which better approximates AE-QIP results
-        quantum_sim = 0.8 * classical_sim + 0.2 * phase_similarity
+        # Optimized quantum weighting (simplified)
+        # Use 85/15 weighting for better balance
+        quantum_sim = 0.85 * classical_sim + 0.15 * phase_similarity
+        
+        # Map to [0, 1] range
+        normalized_sim = (quantum_sim + 1.0) / 2.0
         
         # Ensure result is in [0, 1] range
-        return float(max(0.0, min(1.0, quantum_sim)))
+        return float(max(0.0, min(1.0, normalized_sim)))
     
     def ae_qip_similarity(self, f1_norm, f2_norm):
         """
